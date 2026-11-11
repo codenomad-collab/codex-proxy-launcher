@@ -23,6 +23,7 @@ struct DashboardView: View {
                     header
                     statusStrip
                     actionBar
+                    nativeNetworkCard
                     metrics
                     trafficChart
                     proxyIPCard
@@ -48,7 +49,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex 代理启动器")
                     .font(.system(size: 25, weight: .bold, design: .rounded))
-                Text("专属代理 · 流量监控 · 出口网络诊断")
+                Text("v0.3.0 · 原生组件兼容 · 流量与网络诊断")
                     .font(.callout)
                     .foregroundStyle(.white.opacity(0.64))
             }
@@ -221,6 +222,42 @@ struct DashboardView: View {
                 }
             }
             .frame(height: 158)
+        }
+        .panelStyle()
+    }
+
+    private var nativeNetworkCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("电脑插件与原生组件", systemImage: "desktopcomputer")
+                    .font(.headline)
+                Spacer()
+                if viewModel.nativeProxyBusy { ProgressView().controlSize(.small) }
+                else {
+                    Button("重新检测") { Task { await viewModel.refreshNativeNetwork() } }
+                        .buttonStyle(.plain).foregroundStyle(.cyan)
+                }
+            }
+            Text(viewModel.nativeProxyMessage)
+                .font(.callout)
+                .foregroundStyle(viewModel.nativeProbe?.reachable == true ? .green : .orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("兼容模式仅代理 OpenAI 相关域名，其他域名直连；对当前网络上遵循系统代理的应用生效。首次需在终端完成管理员授权，关闭或退出启动器时恢复原设置。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text(viewModel.nativeProxyActive ? "兼容代理已开启" : "兼容代理未开启")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(viewModel.nativeProxyActive ? "关闭并恢复原设置" : "开启原生组件兼容代理") {
+                    Task {
+                        if viewModel.nativeProxyActive { await viewModel.disableNativeCompatibility() }
+                        else { await viewModel.enableNativeCompatibility() }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.nativeProxyBusy || viewModel.proxyReachable == false)
+            }
         }
         .panelStyle()
     }

@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "CodexProxyLauncher", targets: ["CodexProxyLauncher"]),
+        .executable(name: "CodexNativeProxy", targets: ["CodexNativeProxy"]),
         .library(name: "CodexProxyLauncherCore", targets: ["CodexProxyLauncherCore"])
     ],
     targets: [
@@ -19,6 +20,7 @@ let package = Package(
             name: "CodexProxyLauncher",
             dependencies: ["CodexProxyLauncherCore"]
         ),
+        .executableTarget(name: "CodexNativeProxy", dependencies: ["CodexProxyLauncherCore"]),
         .testTarget(
             name: "CodexProxyLauncherCoreTests",
             dependencies: ["CodexProxyLauncherCore"]

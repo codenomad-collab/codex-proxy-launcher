@@ -27,9 +27,11 @@ esac
 /bin/rm -rf "$APP_DIR"
 /bin/mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 /bin/cp "$BIN_DIR/CodexProxyLauncher" "$MACOS_DIR/CodexProxyLauncher"
+/bin/cp "$BIN_DIR/CodexNativeProxy" "$MACOS_DIR/CodexNativeProxy"
 /bin/cp "$PROJECT_DIR/Packaging/Info.plist" "$CONTENTS_DIR/Info.plist"
 /bin/cp "$PROJECT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 
+/usr/bin/codesign --force --sign - --timestamp=none "$MACOS_DIR/CodexNativeProxy"
 /usr/bin/codesign --force --sign - --timestamp=none "$APP_DIR"
 /usr/bin/codesign --verify --deep --strict "$APP_DIR"
 

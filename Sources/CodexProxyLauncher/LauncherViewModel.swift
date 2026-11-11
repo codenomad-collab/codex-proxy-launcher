@@ -31,12 +31,18 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var ipInfoLoading = false
     @Published private(set) var ipInfoError: String?
     @Published private(set) var ipInfoUpdatedAt: Date?
+    @Published private(set) var nativeProbe: NativeNetworkProbe?
+    @Published private(set) var explicitNativeProbe: NativeNetworkProbe?
+    @Published private(set) var nativeProxyActive = false
+    @Published private(set) var nativeProxyBusy = false
+    @Published private(set) var nativeProxyMessage = "原生组件网络尚未检测。"
 
     let proxy = ProxySettings()
     private let launcher = CodexLauncher()
     private var trafficAccumulator = TrafficAccumulator()
     private var monitoredRoots: Set<Int32> = []
     private var monitoringTask: Task<Void, Never>?
+    private let nativeProxy = NativeProxyClient.shared
 
     var isBusy: Bool {
         activity != .idle
@@ -79,6 +85,11 @@ final class LauncherViewModel: ObservableObject {
             guard let self else { return }
             await self.refresh()
             await self.refreshProxyIPInfo()
+            if UserDefaults.standard.bool(forKey: "nativeProxyCompatibilityEnabled") || self.nativeProxy.session?.isLive == true {
+                await self.enableNativeCompatibility()
+            } else {
+                await self.refreshNativeNetwork()
+            }
 
             while !Task.isCancelled {
                 await self.sampleTraffic()
@@ -114,7 +125,60 @@ final class LauncherViewModel: ObservableObject {
     func refreshAll() async {
         await refresh()
         await refreshProxyIPInfo()
+        await refreshNativeNetwork()
         await sampleTraffic()
+    }
+
+    func refreshNativeNetwork() async {
+        guard !nativeProxyBusy else { return }
+        nativeProxyBusy = true
+        defer { nativeProxyBusy = false }
+        async let system = NativeNetworkDiagnostics.probe()
+        async let explicit = NativeNetworkDiagnostics.probe(proxy: proxy)
+        nativeProbe = await system
+        explicitNativeProbe = await explicit
+        nativeProxyActive = nativeProxy.session?.isLive == true
+        updateNativeMessage()
+    }
+
+    func enableNativeCompatibility() async {
+        guard !nativeProxyBusy else { return }
+        nativeProxyBusy = true
+        do {
+            try await nativeProxy.start(proxy: proxy)
+            nativeProxyActive = true
+            UserDefaults.standard.set(true, forKey: "nativeProxyCompatibilityEnabled")
+            // A fresh URLSession uses the current system PAC, just like native helpers.
+            nativeProbe = await NativeNetworkDiagnostics.probe()
+            explicitNativeProbe = await NativeNetworkDiagnostics.probe(proxy: proxy)
+            updateNativeMessage()
+        } catch {
+            nativeProxyActive = nativeProxy.session?.isLive == true
+            nativeProxyMessage = error.localizedDescription
+        }
+        nativeProxyBusy = false
+    }
+
+    func disableNativeCompatibility() async {
+        guard !nativeProxyBusy else { return }
+        nativeProxyBusy = true
+        do {
+            try await nativeProxy.stop()
+            nativeProxyActive = false
+            UserDefaults.standard.set(false, forKey: "nativeProxyCompatibilityEnabled")
+            nativeProxyMessage = "兼容代理已关闭，原系统代理设置已恢复。"
+        } catch { nativeProxyMessage = error.localizedDescription }
+        nativeProxyBusy = false
+    }
+
+    private func updateNativeMessage() {
+        if nativeProbe?.reachable == true {
+            nativeProxyMessage = "原生联网可达（HTTP \(nativeProbe?.statusCode ?? 0)）；登录与电脑控制需单独验证。"
+        } else if explicitNativeProbe?.reachable == true {
+            nativeProxyMessage = "Clash 可达，但原生组件网络不通。可开启下方兼容代理。"
+        } else {
+            nativeProxyMessage = "原生与显式代理请求均未连通，请先检查 Clash 线路。"
+        }
     }
 
     func refreshProxyIPInfo() async {
@@ -176,6 +240,7 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func sampleTraffic() async {
+        nativeProxyActive = nativeProxy.session?.isLive == true
         let roots = Set(launcher.runningApplications().map(\.processIdentifier))
         codexRunning = !roots.isEmpty
 
