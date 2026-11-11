@@ -48,6 +48,12 @@
 
 回家后复测默认原生请求约 1624 ms、显式代理约 4454 ms，均返回 HTTP 401。结论仅限未认证请求可达。按照 [官方浏览器扩展排查说明](https://learn.chatgpt.com/docs/chrome-extension)，下一步改为在新对话选择 `@Chrome` 后进行实际页面验收；不再重复让用户在同一旧对话重选插件。
 
+### 实际浏览器调用补验与更正
+
+用户继续明确选择内置 Browser 后，找到了本机动态生成的 Browser 技能说明（位于 `.codex/.tmp/bundled-marketplaces/openai-bundled/plugins/browser/skills/control-in-app-browser/SKILL.md`）。缓存插件的空 `skills/` 目录不能证明运行时不可初始化，先前只根据接口清单和空目录推断不可用不够完整。
+
+本轮已按照该说明，通过官方 Browser 插件入口执行初始化并选择 `iab`，真实返回 `Local browser access is unavailable for this chat`。沿用已创建的连接读取恢复说明、只读列举浏览器，均返回同一错误。未打开目标页面、未获得截图、未切换其他控制机制，也未修改官方客户端或访问授权。因此当前页面验收明确为 **未通过 / 受当前对话本机浏览器访问阻断**，不能据网络探测、插件启用或服务就绪宣称通过。为何本对话不可访问尚未确定；需要新建本地对话后再实际复验，新对话是否能够恢复仍待验证。
+
 后续顺序：
 
 1. 已确认新官方客户端进程和电脑控制服务创建，兼容 PAC 有效。
