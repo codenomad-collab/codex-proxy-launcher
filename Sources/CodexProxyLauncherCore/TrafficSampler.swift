@@ -17,17 +17,20 @@ public struct RawTrafficSnapshot: Equatable, Sendable {
     public let counters: [Int32: ProcessTrafficCounter]
     public let activeProxyConnections: Int
     public let directExternalTCPConnections: Int
+    public let samplingError: String?
 
     public init(
         timestamp: Date = Date(),
         counters: [Int32: ProcessTrafficCounter],
         activeProxyConnections: Int,
-        directExternalTCPConnections: Int
+        directExternalTCPConnections: Int,
+        samplingError: String? = nil
     ) {
         self.timestamp = timestamp
         self.counters = counters
         self.activeProxyConnections = activeProxyConnections
         self.directExternalTCPConnections = directExternalTCPConnections
+        self.samplingError = samplingError
     }
 }
 
@@ -39,6 +42,7 @@ public struct TrafficMetrics: Equatable, Sendable {
     public let activeProxyConnections: Int
     public let directExternalTCPConnections: Int
     public let observedProcessCount: Int
+    public let samplingError: String?
 
     public static let zero = TrafficMetrics(
         downloadBytesPerSecond: 0,
@@ -47,7 +51,8 @@ public struct TrafficMetrics: Equatable, Sendable {
         sessionUploadedBytes: 0,
         activeProxyConnections: 0,
         directExternalTCPConnections: 0,
-        observedProcessCount: 0
+        observedProcessCount: 0,
+        samplingError: nil
     )
 }
 
@@ -74,7 +79,7 @@ public struct TrafficAccumulator: Sendable {
         var incomingDelta: UInt64 = 0
         var outgoingDelta: UInt64 = 0
 
-        if previousTimestamp != nil {
+        if snapshot.samplingError == nil, previousTimestamp != nil {
             for (pid, current) in snapshot.counters {
                 guard let previous = previousCounters[pid] else { continue }
                 if current.bytesIn >= previous.bytesIn {
@@ -88,8 +93,12 @@ public struct TrafficAccumulator: Sendable {
 
         downloadedBytes += incomingDelta
         uploadedBytes += outgoingDelta
-        previousCounters = snapshot.counters
-        previousTimestamp = snapshot.timestamp
+        // A failed sample must not replace the last good baseline. Recovery
+        // includes traffic across the gap and uses the full elapsed interval.
+        if snapshot.samplingError == nil {
+            previousCounters = snapshot.counters
+            previousTimestamp = snapshot.timestamp
+        }
 
         return TrafficMetrics(
             downloadBytesPerSecond: Double(incomingDelta) / interval,
@@ -98,16 +107,39 @@ public struct TrafficAccumulator: Sendable {
             sessionUploadedBytes: uploadedBytes,
             activeProxyConnections: snapshot.activeProxyConnections,
             directExternalTCPConnections: snapshot.directExternalTCPConnections,
-            observedProcessCount: snapshot.counters.count
+            observedProcessCount: snapshot.samplingError == nil ? snapshot.counters.count : 0,
+            samplingError: snapshot.samplingError
         )
     }
 }
 
 public enum TrafficSampler {
+    struct CommandResult {
+        let output: String
+        let exitStatus: Int32?
+
+        var succeeded: Bool { exitStatus == 0 }
+        var failureDescription: String {
+            exitStatus.map { "退出码 \($0)" } ?? "无法执行"
+        }
+    }
+
     public static func sample(
         rootPIDs: [Int32],
         proxy: ProxySettings
     ) async -> RawTrafficSnapshot {
+        await Task.detached(priority: .utility) {
+            Self.collect(rootPIDs: rootPIDs, proxy: proxy, run: Self.runCommand)
+        }.value
+    }
+
+    /// The command seam exercises the production orchestration, including
+    /// nettop's system limit and command failures, without invoking live apps.
+    static func collect(
+        rootPIDs: [Int32],
+        proxy: ProxySettings,
+        run: (String, [String]) -> CommandResult
+    ) -> RawTrafficSnapshot {
         guard !rootPIDs.isEmpty else {
             return RawTrafficSnapshot(
                 counters: [:],
@@ -116,56 +148,69 @@ public enum TrafficSampler {
             )
         }
 
-        return await Task.detached(priority: .utility) {
-            let processTableOutput = Self.runCommand(
-                executable: "/bin/ps",
-                arguments: ["-axo", "pid=,ppid="]
-            )
-            let pids = Self.descendantPIDs(
-                processTable: processTableOutput,
-                roots: Set(rootPIDs)
-            )
-            guard !pids.isEmpty else {
-                return RawTrafficSnapshot(
-                    counters: [:],
-                    activeProxyConnections: 0,
-                    directExternalTCPConnections: 0
-                )
-            }
-
-            var nettopArguments = [
-                "-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out"
-            ]
-            for pid in pids.sorted() {
-                nettopArguments.append(contentsOf: ["-p", String(pid)])
-            }
-            let nettopOutput = Self.runCommand(
-                executable: "/usr/bin/nettop",
-                arguments: nettopArguments
-            )
-            let counters = Self.parseNettopCSV(nettopOutput)
-
-            let lsofOutput = Self.runCommand(
-                executable: "/usr/sbin/lsof",
-                arguments: [
-                    "-nP",
-                    "-a",
-                    "-p", pids.sorted().map { String($0) }.joined(separator: ","),
-                    "-iTCP",
-                    "-sTCP:ESTABLISHED"
-                ]
-            )
-            let connectionCounts = Self.parseConnectionCounts(
-                lsofOutput,
-                proxy: proxy
-            )
-
+        let processTableOutput = run("/bin/ps", ["-axo", "pid=,ppid="])
+        guard processTableOutput.succeeded else {
             return RawTrafficSnapshot(
-                counters: counters,
-                activeProxyConnections: connectionCounts.proxy,
-                directExternalTCPConnections: connectionCounts.directExternal
+                counters: [:], activeProxyConnections: 0, directExternalTCPConnections: 0,
+                samplingError: "无法读取进程列表（ps：\(processTableOutput.failureDescription)）"
             )
-        }.value
+        }
+        let pids = Self.descendantPIDs(
+            processTable: processTableOutput.output,
+            roots: Set(rootPIDs)
+        )
+        guard !pids.isEmpty else {
+            return RawTrafficSnapshot(
+                counters: [:],
+                activeProxyConnections: 0,
+                directExternalTCPConnections: 0
+            )
+        }
+
+        var counters: [Int32: ProcessTrafficCounter] = [:]
+        var samplingError: String?
+        let sortedPIDs = pids.sorted()
+        // macOS nettop exits with status 64 if more than 20 PIDs are
+        // selected. Every batch must succeed; partial totals are invalid.
+        for start in stride(from: 0, to: sortedPIDs.count, by: 20) {
+            let batch = sortedPIDs[start..<min(start + 20, sortedPIDs.count)]
+            var arguments = ["-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out"]
+            for pid in batch { arguments.append(contentsOf: ["-p", String(pid)]) }
+            let result = run("/usr/bin/nettop", arguments)
+            guard result.succeeded else {
+                samplingError = "流量采集失败（nettop：\(result.failureDescription)）"
+                break
+            }
+            guard result.output.split(whereSeparator: \.isNewline).contains(where: {
+                $0.hasPrefix(",bytes_in,bytes_out")
+            }) else {
+                samplingError = "流量采集失败：无法识别 nettop 输出"
+                break
+            }
+            for (pid, counter) in Self.parseNettopCSV(result.output) where batch.contains(pid) {
+                counters[pid] = counter
+            }
+        }
+        if samplingError != nil { counters.removeAll() }
+
+        let lsofOutput = run("/usr/sbin/lsof", [
+            "-nP",
+            "-a",
+            "-p", sortedPIDs.map { String($0) }.joined(separator: ","),
+            "-iTCP",
+            "-sTCP:ESTABLISHED"
+        ])
+        let connectionCounts = Self.parseConnectionCounts(
+            lsofOutput.output,
+            proxy: proxy
+        )
+
+        return RawTrafficSnapshot(
+            counters: counters,
+            activeProxyConnections: connectionCounts.proxy,
+            directExternalTCPConnections: connectionCounts.directExternal,
+            samplingError: samplingError
+        )
     }
 
     static func descendantPIDs(
@@ -274,22 +319,25 @@ public enum TrafficSampler {
     private static func runCommand(
         executable: String,
         arguments: [String]
-    ) -> String {
+    ) -> CommandResult {
         let process = Process()
         let outputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardOutput = outputPipe
-        process.standardError = FileHandle.nullDevice
+        process.standardError = outputPipe
 
         do {
             try process.run()
         } catch {
-            return ""
+            return CommandResult(output: "", exitStatus: nil)
         }
 
         let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
+        return CommandResult(
+            output: String(data: data, encoding: .utf8) ?? "",
+            exitStatus: process.terminationStatus
+        )
     }
 }

@@ -6,7 +6,7 @@
 
 一个针对 Codex / ChatGPT macOS 桌面客户端的开源代理启动器。普通启动模式通过本机 Clash Verge 注入代理，不修改系统代理；可选的原生组件兼容模式使用可恢复的系统 PAC，覆盖新版电脑插件等不遵循进程代理参数的组件。
 
-> 当前代码版本：0.3.0 · [已发布版本](https://github.com/ww1425680101/codex-proxy-launcher/releases/latest)
+> 当前代码版本：0.3.1 · [已发布版本](https://github.com/ww1425680101/codex-proxy-launcher/releases/latest)
 
 ## 功能
 
@@ -95,6 +95,8 @@ PAC 服务只监听回环地址；停止与会话交接接口需要独立随机�
 - `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及对应小写环境变量，供 Codex app-server 和支持代理环境变量的子进程继承。
 
 流量仪表盘使用 macOS 自带的 `nettop` 读取进程累计字节数，并根据相邻采样计算速率；连接审计使用 `lsof` 检查 Codex 进程树已经建立的 TCP 连接。上述操作不需要管理员权限。
+
+采样按每批最多 20 个 PID 分批执行，覆盖较大的客户端进程树。命令失败时显示采集异常和“—”，保留累计值及最后有效基线，不将失败画成零流量；恢复后的速率按实际间隔计算。
 
 ## 隐私说明
 

@@ -49,7 +49,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex 代理启动器")
                     .font(.system(size: 25, weight: .bold, design: .rounded))
-                Text("v0.3.0 · 原生组件兼容 · 流量与网络诊断")
+                Text("v0.3.1 · 原生组件兼容 · 流量与网络诊断")
                     .font(.callout)
                     .foregroundStyle(.white.opacity(0.64))
             }
@@ -99,13 +99,13 @@ struct DashboardView: View {
         HStack(spacing: 12) {
             MetricCard(
                 title: "实时下载",
-                value: TrafficFormat.rate(viewModel.trafficMetrics.downloadBytesPerSecond),
+                value: viewModel.downloadRateText,
                 icon: "arrow.down",
                 color: .cyan
             )
             MetricCard(
                 title: "实时上传",
-                value: TrafficFormat.rate(viewModel.trafficMetrics.uploadBytesPerSecond),
+                value: viewModel.uploadRateText,
                 icon: "arrow.up",
                 color: .green
             )
@@ -171,6 +171,13 @@ struct DashboardView: View {
                 Spacer()
                 ChartLegend(color: .cyan, title: "下载")
                 ChartLegend(color: .green, title: "上传")
+            }
+
+            if let error = viewModel.trafficMetrics.samplingError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Chart {
@@ -373,13 +380,13 @@ struct CompactMenuView: View {
             HStack {
                 CompactMetric(
                     title: "下载",
-                    value: TrafficFormat.rate(viewModel.trafficMetrics.downloadBytesPerSecond),
+                    value: viewModel.downloadRateText,
                     color: .cyan
                 )
                 Spacer()
                 CompactMetric(
                     title: "上传",
-                    value: TrafficFormat.rate(viewModel.trafficMetrics.uploadBytesPerSecond),
+                    value: viewModel.uploadRateText,
                     color: .green
                 )
                 Spacer()
@@ -388,6 +395,12 @@ struct CompactMenuView: View {
                     value: "\(viewModel.trafficMetrics.activeProxyConnections)",
                     color: .orange
                 )
+            }
+
+            if let error = viewModel.trafficMetrics.samplingError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
             if let info = viewModel.proxyIPInfo {
@@ -522,7 +535,7 @@ private struct ChartLegend: View {
     }
 }
 
-private enum TrafficFormat {
+enum TrafficFormat {
     static func bytes(_ value: UInt64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file

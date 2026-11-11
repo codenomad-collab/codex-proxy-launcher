@@ -42,6 +42,8 @@ final class LauncherViewModel: ObservableObject {
     private var trafficAccumulator = TrafficAccumulator()
     private var monitoredRoots: Set<Int32> = []
     private var monitoringTask: Task<Void, Never>?
+    private var networkSetupTask: Task<Void, Never>?
+    private var samplingTraffic = false
     private let nativeProxy = NativeProxyClient.shared
 
     var isBusy: Bool {
@@ -49,7 +51,7 @@ final class LauncherViewModel: ObservableObject {
     }
 
     var menuBarSymbol: String {
-        if proxyReachable == false || trafficMetrics.directExternalTCPConnections > 0 {
+        if proxyReachable == false || trafficMetrics.directExternalTCPConnections > 0 || trafficMetrics.samplingError != nil {
             return "exclamationmark.triangle.fill"
         }
         return codexRunning ? "network.badge.shield.half.filled" : "network"
@@ -57,6 +59,14 @@ final class LauncherViewModel: ObservableObject {
 
     var primaryButtonTitle: String {
         codexRunning ? "重启 Codex 并启用代理" : "启动 Codex（使用代理）"
+    }
+
+    var downloadRateText: String {
+        trafficMetrics.samplingError == nil ? TrafficFormat.rate(trafficMetrics.downloadBytesPerSecond) : "—"
+    }
+
+    var uploadRateText: String {
+        trafficMetrics.samplingError == nil ? TrafficFormat.rate(trafficMetrics.uploadBytesPerSecond) : "—"
     }
 
     var chartMaximum: Double {
@@ -84,11 +94,15 @@ final class LauncherViewModel: ObservableObject {
         monitoringTask = Task { [weak self] in
             guard let self else { return }
             await self.refresh()
-            await self.refreshProxyIPInfo()
-            if UserDefaults.standard.bool(forKey: "nativeProxyCompatibilityEnabled") || self.nativeProxy.session?.isLive == true {
-                await self.enableNativeCompatibility()
-            } else {
-                await self.refreshNativeNetwork()
+            // Proxy diagnostics or an outstanding admin prompt must not stop
+            // the independent traffic sampler from updating the dashboard.
+            self.networkSetupTask = Task {
+                await self.refreshProxyIPInfo()
+                if UserDefaults.standard.bool(forKey: "nativeProxyCompatibilityEnabled") || self.nativeProxy.session?.isLive == true {
+                    await self.enableNativeCompatibility()
+                } else {
+                    await self.refreshNativeNetwork()
+                }
             }
 
             while !Task.isCancelled {
@@ -240,6 +254,9 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func sampleTraffic() async {
+        guard !samplingTraffic else { return }
+        samplingTraffic = true
+        defer { samplingTraffic = false }
         nativeProxyActive = nativeProxy.session?.isLive == true
         let roots = Set(launcher.runningApplications().map(\.processIdentifier))
         codexRunning = !roots.isEmpty
@@ -261,11 +278,14 @@ final class LauncherViewModel: ObservableObject {
         )
         trafficMetrics = trafficAccumulator.ingest(snapshot)
         trafficUpdatedAt = snapshot.timestamp
-        trafficHistory.append(TrafficPoint(
-            timestamp: snapshot.timestamp,
-            downloadBytesPerSecond: trafficMetrics.downloadBytesPerSecond,
-            uploadBytesPerSecond: trafficMetrics.uploadBytesPerSecond
-        ))
+        if snapshot.samplingError == nil {
+            trafficHistory.append(TrafficPoint(
+                timestamp: snapshot.timestamp,
+                downloadBytesPerSecond: trafficMetrics.downloadBytesPerSecond,
+                uploadBytesPerSecond: trafficMetrics.uploadBytesPerSecond
+            ))
+        }
+        trafficHistory.removeAll { $0.timestamp < snapshot.timestamp.addingTimeInterval(-180) }
         if trafficHistory.count > 90 {
             trafficHistory.removeFirst(trafficHistory.count - 90)
         }
